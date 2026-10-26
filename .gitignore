@@ -23,3 +23,8 @@ Desktop.ini
 shot*.png
 # Monaco vendor (unused)
 src/GitDiffReviewer/wwwroot/vendor/
+
+# Screenshots and debug images
+*.png
+*.zip
+!docs/*.png
