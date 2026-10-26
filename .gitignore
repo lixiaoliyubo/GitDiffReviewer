@@ -1,0 +1,25 @@
+# Build output
+publish/
+bin/
+obj/
+
+# VS / Rider
+.vs/
+.idea/
+*.user
+*.suo
+
+# Node
+node_modules/
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Screenshots
+shot*.png
+# Monaco vendor (unused)
+src/GitDiffReviewer/wwwroot/vendor/

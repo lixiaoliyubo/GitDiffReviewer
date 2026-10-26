@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>GitDiffReviewer</title>
+  <link rel="stylesheet" href="./element-plus.css" />
+  <link rel="stylesheet" href="./highlight-theme.css" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<div id="app">
+  <div class="titlebar">
+    <span class="app-title"><span class="logo">&#9670;</span> GitDiff Reviewer</span>
+    <el-select v-model="activeRepo" placeholder="选择仓库" size="small" class="repo-selector" @change="onRepoChange">
+      <el-option v-for="r in repos" :key="r.path" :label="r.name" :value="r.path"></el-option>
+    </el-select>
+    <el-button size="small" @click="onAddRepo">+ 添加仓库</el-button>
+    <el-button size="small" text @click="toggleCommitPanel" :class="{active: commitPanelOpen}">
+      {{ commitPanelOpen ? '▾ 提交历史' : '▸ 提交历史' }}
+    </el-button>
+    <span class="baseline" v-if="!commitMode && activeRepo">工作区 ↔ HEAD</span>
+    <span class="baseline commit-badge" v-if="commitMode">提交 {{ currentCommitShort }}</span>
+    <span class="spacer"></span>
+    <el-button v-if="commitMode" size="small" @click="backToWorkingTree">返回工作区</el-button>
+    <span class="stats" v-if="statsText">{{ statsText }}</span>
+    <el-button size="small" @click="loadChanges">⟳ 刷新</el-button>
+  </div>
+  <div class="commit-panel" v-show="commitPanelOpen">
+    <div class="commit-list">
+      <div v-for="c in commits" :key="c.sha" class="commit-item" :class="{active: currentCommitSha===c.sha}" @click="onCommitClick(c)">
+        <span class="commit-sha">{{ c.short }}</span>
+        <span class="commit-msg">{{ c.message }}</span>
+        <span class="commit-author">{{ c.author }}</span>
+        <span class="commit-date">{{ formatDate(c.date) }}</span>
+      </div>
+      <div v-if="!commits.length" class="empty-state"><p>加载中…</p></div>
+    </div>
+  </div>
+  <el-alert v-if="errorBar" :title="errorBar" type="error" :closable="true" @close="errorBar=''" show-icon class="error-alert"></el-alert>
+  <div class="body">
+    <aside class="left">
+      <div class="left-header">
+        <span>更改</span>
+        <span class="count-badge" v-if="current && current.entries.length">{{ current.entries.length }}</span>
+      </div>
+      <div class="search-wrap">
+        <el-input v-model="searchQ" placeholder="搜索文件…" size="small" clearable></el-input>
+      </div>
+      <div class="filter-bar">
+        <el-radio-group v-model="filter" size="small">
+          <el-radio-button value="all">全部</el-radio-button>
+          <el-radio-button value="added">新增</el-radio-button>
+          <el-radio-button value="modified">修改</el-radio-button>
+          <el-radio-button value="deleted">删除</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div class="filter-bar">
+        <el-button size="small" text class="tool-btn" @click="viewMode=viewMode==='tree'?'flat':'tree'">{{ viewMode==='tree'?'▤ 平铺':'⊟ 树形' }}</el-button>
+        <el-button size="small" text class="tool-btn" @click="toggleScope">{{ showAllFiles?'只看改动':'全部文件' }}</el-button>
+        <el-button size="small" text class="tool-btn" :class="{active: showIgnored}" @click="showIgnored=!showIgnored">{{ showIgnored ? '🙈 显示忽略' : '🙈 隐藏忽略' }}</el-button>
+      </div>
+      <div class="list-container">
+        <div v-if="!activeRepo" class="empty-state">
+          <p>还没有选择仓库</p>
+          <el-button type="primary" size="small" @click="onAddRepo">选择仓库…</el-button>
+        </div>
+        <div v-else-if="visibleEntries.length===0" class="empty-state">
+          <p>✓ 工作区干净，没有未提交的更改</p>
+          <el-button size="small" @click="loadChanges">刷新</el-button>
+        </div>
+        <template v-else>
+          <div v-for="item in treeData" :key="item.path" class="tree-node" :class="{selected:item.path===lastSelectedPath}" :style="{paddingLeft: (8 + (item.depth||0)*16)+'px'}" @click="onNodeClick(item)" @contextmenu.prevent="onContextMenu($event,item)">
+            <span class="tree-arrow" @click.stop="toggleDir(item)">{{ item.children ? (expandedDirsSet.has(item.path)?'▼':'▶') : '' }}</span>
+            <span class="tree-icon" :class="dirIconClass(item)">{{ item.children ? '📁' : fileIcon(item.name) }}</span>
+            <span class="tree-name">{{ item.name }}</span>
+            <span class="tree-count" v-if="item.children">{{ item._count }}</span>
+            <span class="tree-stats" v-if="!item.children && item.insertions">{{ '+'+item.insertions }}</span>
+            <span class="tree-stats del" v-if="!item.children && item.deletions">{{ '-'+item.deletions }}</span>
+          </div>
+        </template>
+      </div>
+      <div class="commit-info-panel" v-if="commitMode">
+        <div class="commit-info-header" @click="commitInfoOpen=!commitInfoOpen">
+          <span>{{ commitInfoOpen ? '▾' : '▸' }} 选中提交</span>
+          <span class="commit-info-sha">{{ currentCommitShort }}</span>
+        </div>
+        <div class="commit-info-body" v-show="commitInfoOpen">
+          <div class="commit-info-msg">{{ currentCommitMessage }}</div>
+          <div class="commit-info-meta">
+            <div>作者: {{ currentCommitAuthor }}</div>
+            <div>时间: {{ currentCommitDate }}</div>
+          </div>
+          <el-button size="small" text class="tool-btn" @click="backToWorkingTree">← 返回工作区视图</el-button>
+        </div>
+      </div>
+    </aside>
+    <div class="right">
+      <div class="right-tabs" v-if="lastEntry">
+        <span class="file-path">
+          <span class="dir">{{ dirOf(lastEntry.path) }}</span>{{ baseOf(lastEntry.path) }}
+        </span>
+        <el-radio-group v-model="rightTab" size="small" @change="onTabChange">
+          <el-radio-button value="diff">Diff</el-radio-button>
+          <el-radio-button value="info">详情</el-radio-button>
+        </el-radio-group>
+        <el-button v-if="rightTab==='info' && isDirty && !currentData?.binary" size="small" type="primary" class="action-btn" @click="saveFile">保存</el-button>
+        <el-button v-if="rightTab==='info' && isDirty && !currentData?.binary" size="small" class="action-btn" @click="cancelEdit">取消</el-button>
+        <span class="spacer"></span>
+        <el-button size="small" text class="action-btn" title="上一个文件" @click="navigateFile(-1)">↑</el-button>
+        <el-button size="small" text class="action-btn" title="下一个文件" @click="navigateFile(1)">↓</el-button>
+        <el-button size="small" text class="action-btn" title="关闭" @click="closeFile">✕</el-button>
+        <el-popover width="320" trigger="hover" placement="bottom-end">
+          <template #reference><el-button size="small" text class="action-btn">ⓘ</el-button></template>
+          <div v-html="tooltipHtml"></div>
+        </el-popover>
+      </div>
+      <div class="open-tabs" v-if="openTabs.length">
+        <div v-for="t in openTabs" :key="t.path" class="open-tab" :class="{active: lastEntry && lastEntry.path===t.path}" @click="switchTab(t)">
+          <span>{{ t.path.split('/').pop() }}</span>
+          <span class="tab-close" @click.stop="closeTab(t)">✕</span>
+        </div>
+      </div>
+      <div class="right-content">
+        <div v-if="!lastEntry" class="placeholder">
+          <div class="big-icon">📂</div>
+          <div>在左侧选择一个文件查看 diff</div>
+        </div>
+        <div v-show="rightTab==='diff'&&lastEntry" class="diff-wrap">
+          <div class="diff-host" v-html="diffHtml" @scroll="onDiffScroll" ref="diffHostEl"></div>
+          <div class="minimap" ref="minimapEl" @click="onMinimapClick">
+            <div class="minimap-content" v-html="minimapHtml"></div>
+            <div class="minimap-viewport" :style="{top: minimapViewportTop}"></div>
+          </div>
+        </div>
+        <div v-show="rightTab==='info'&&lastEntry" class="info-host">
+          <div v-if="!currentData?.binary" class="code-editor">
+            <div class="gutter"><div class="gutter-inner" v-html="lineNumbers"></div></div>
+            <div class="editor-area">
+              <pre class="highlight-bg"><code v-html="highlightedContent"></code></pre>
+              <textarea v-model="editContent" class="editor" spellcheck="false" @scroll="syncScroll" @input="onEditorInput" @keydown="onEditorKeydown" ref="editorEl"></textarea>
+            </div>
+          </div>
+          <div v-else v-html="infoHtml"></div>
+          <div v-if="autoCompleteVisible" class="autocomplete-dropdown" :style="{top: autoCompletePos.top+'px', left: autoCompletePos.left+'px'}">
+            <div class="autocomplete-list">
+              <div v-for="(item,i) in autoCompleteItems" :key="item.k" class="autocomplete-item" :class="{active: i===autoCompleteIndex}" @mousedown.prevent="applySnippet(item)" @mouseenter="autoCompleteIndex=i">
+                <span class="ac-icon">{{ item.icon || '📦' }}</span>
+                <span class="ac-label">{{ item.label }}</span>
+                <span class="ac-desc">{{ item.desc }}</span>
+              </div>
+            </div>
+            <div class="autocomplete-preview" v-if="autoCompleteItems[autoCompleteIndex]">
+              <div class="ap-kind">Snippet</div>
+              {{ autoCompleteItems[autoCompleteIndex].body.replace('$0','') }}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="find-panel" v-show="findPanelVisible">
+        <div class="find-row">
+          <el-input v-model="findQ" placeholder="查找" size="small" @input="doFind" @keydown.enter="findJump(1)" @keydown.esc="closeFind"></el-input>
+          <el-button size="small" text @click="replaceRowVisible=!replaceRowVisible">⇄</el-button>
+          <span class="find-count">{{ findCountText }}</span>
+          <el-button size="small" text @click="findJump(-1)">↑</el-button>
+          <el-button size="small" text @click="findJump(1)">↓</el-button>
+          <el-button size="small" text @click="closeFind">✕</el-button>
+        </div>
+        <div class="find-row" v-show="replaceRowVisible">
+          <el-input v-model="replaceQ" placeholder="替换" size="small" @keydown.enter="replaceOne"></el-input>
+          <el-button size="small" text @click="replaceOne">替换</el-button>
+          <el-button size="small" text @click="replaceAll">全部替换</el-button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="./vue.global.prod.js"></script>
+<script src="./element-plus.min.js"></script>
+<script src="./element-plus-icons.min.js"></script>
+<script src="./highlight.min.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
